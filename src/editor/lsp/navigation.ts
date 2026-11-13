@@ -22,11 +22,15 @@ import {
   type ViewUpdate,
 } from "@codemirror/view";
 import { Channel } from "@tauri-apps/api/core";
+import type { ServerInfo, ServerStatus } from "@/bindings";
 import {
+  IpcError,
   call,
   commands,
   isCancelled,
+  isTauri,
   nextRequestId,
+  onIdeEvent,
   type DocId,
   type GotoKind,
   type Highlight,
@@ -54,8 +58,10 @@ import {
   SYNTAX_NOTE,
   declarationFallback,
   indexDefinitions,
+  infersDeclarations,
   isSelfTarget,
   localHighlights,
+  projectDefinitions,
   type DeclarationTarget,
 } from "./syntaxFallback";
 import { showHint, showPendingHint } from "./hint";
@@ -399,7 +405,10 @@ async function gotoResolved(
   }
   let serverDown = false;
   let streamed: ReturnType<typeof streamedImplementations> | null = null;
+  const indexing =
+    declaration && !moduleName && infersDeclarations(doc.language) && (await serverIndexing(doc).catch(() => false));
   try {
+    if (indexing) throw INDEXING;
     const stream = kind === "implementation" ? streamedImplementations(view, offset, done, superseded) : null;
     streamed = stream;
     const request = stream ? () => stream.request(doc.doc, pos) : () => requestNavigation(view, offset, kind);
@@ -417,11 +426,12 @@ async function gotoResolved(
     }
     // Web references and links need no server.
     if (
-      (await gotoWebReference(view, doc, pos, offset, superseded)) ||
-      (await followReferenceAt(view, doc, offset, superseded))
+      e !== INDEXING &&
+      ((await gotoWebReference(view, doc, pos, offset, superseded)) ||
+        (await followReferenceAt(view, doc, offset, superseded)))
     )
       return;
-    serverDown = isUnavailable(e);
+    serverDown = isUnavailable(e) && e !== INDEXING;
     // Dumb mode: the server is not ready / failing — answer from the syntax tree.
     // An import path is not a name to look up: only its file matters.
     const fb = moduleName ? null : await gotoFallback(view, doc, pos);
@@ -453,14 +463,18 @@ async function gotoResolved(
     // module path: a segment is not a symbol name.
     if (declaration && !fromSyntax && !moduleName) {
       const name = nameAt(view, offset);
-      const targets = name ? await indexDefinitions(doc.path, name).catch(() => []) : [];
+      const inferred = infersDeclarations(doc.language);
+      const lookup = inferred ? projectDefinitions : indexDefinitions;
+      const targets = name ? await lookup(doc.path, name).catch(() => []) : [];
+      if (superseded()) return;
       if (targets.length) {
         if (isSelfTarget(targets, doc.path, pos)) {
           if (!(await executeAction("find.showUsages"))) showHint(view, "No usages found");
           return;
         }
-        if (targets.length === 1) {
-          await navigateTo(targets[0]!);
+        const local = inferred ? targets.filter((t) => t.path === doc.path) : [];
+        if (targets.length === 1 || local.length === 1) {
+          await navigateTo(local.length === 1 ? local[0]! : targets[0]!);
           return;
         }
         openPopup({
@@ -530,6 +544,10 @@ async function gotoResolved(
     if (!(await executeAction("find.showUsages")) && !superseded()) showHint(view, "No usages found");
     return;
   }
+  if (locs.length > 1 && infersDeclarations(doc.language)) {
+    const local = locs.filter((l) => l.path === doc.path);
+    if (local.length === 1) locs = local;
+  }
   if (locs.length === 1) {
     await navigateTo(locs[0]!);
     // After the editor applied the navigation's selection (which dismisses hints).
@@ -542,6 +560,12 @@ async function gotoResolved(
     return;
   }
   const name = nameAt(view, offset);
+  if (declaration && !fromSyntax && name && infersDeclarations(doc.language)) {
+    const extra = await projectDefinitions(doc.path, name).catch(() => []);
+    if (superseded()) return;
+    const seen = new Set(locs.map((l) => `${l.path}:${l.range.start.line}`));
+    locs = [...locs, ...extra.filter((t) => !seen.has(`${t.path}:${t.range.start.line}`))];
+  }
   const items = await locationItems(locs);
   if (superseded()) return;
   openPopup({
@@ -622,6 +646,25 @@ async function followReferenceAt(
     if (!superseded()) showHint(view, e instanceof Error ? e.message : String(e), { tone: "error" });
   }
   return true;
+}
+
+const INDEXING = new IpcError({ kind: "unavailable", message: "language server indexing", data: null });
+const LOADING: ReadonlySet<ServerStatus> = new Set<ServerStatus>(["starting", "busy"]);
+let serversSnapshot: Promise<ServerInfo[]> | null = null;
+let offServerEvents: (() => void) | null = null;
+
+async function serverIndexing(doc: EditorDocContext): Promise<boolean> {
+  if (!isTauri()) return false;
+  offServerEvents ??= (() => {
+    const reset = () => {
+      serversSnapshot = null;
+    };
+    const off = [onIdeEvent("languageServer", reset), onIdeEvent("languageServerRemoved", reset)];
+    return () => off.forEach((f) => f());
+  })();
+  serversSnapshot ??= call(commands.lspServers()).catch(() => []);
+  const own = (await serversSnapshot).filter((s) => s.languages.includes(doc.language) && doc.path.startsWith(s.root));
+  return own.length > 0 && own.every((s) => LOADING.has(s.status));
 }
 
 /** Declaration targets from the structure service; null when it cannot answer for this file. */

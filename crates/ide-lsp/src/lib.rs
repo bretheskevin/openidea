@@ -85,6 +85,9 @@ const LONG_TIMEOUT: Duration = Duration::from_secs(30);
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long a request waits for a server that is still initializing.
 const START_WAIT: Duration = Duration::from_secs(10);
+/// Go to Definition / Declaration waits less: past this the editor answers from the
+/// project index (IDEA's dumb mode) instead of holding a click for a slow server start.
+const NAV_START_WAIT: Duration = Duration::from_millis(500);
 /// File moves may start a server (jdtls takes a while to import).
 const FILE_OP_START_WAIT: Duration = Duration::from_secs(20);
 /// Files of a moved folder looked at to find the languages involved.
@@ -618,6 +621,19 @@ impl LspManager {
             .max_by_key(|root| root.components().count())
             .cloned()
             .unwrap_or_else(|| self.project_root.clone())
+    }
+
+    /// The root of the running server that analyses `path` (the deepest one of its language
+    /// containing it): what it sees is that root, not necessarily the whole project — a
+    /// monorepo member with its own `Gemfile` / `package.json` gets a server of its own.
+    pub fn server_root_for(&self, path: &Path) -> Option<PathBuf> {
+        let language = self.languages.detect(path, None);
+        self.servers
+            .lock()
+            .iter()
+            .filter(|s| path.starts_with(&s.root) && s.languages().contains(&language))
+            .map(|s| s.root.clone())
+            .max_by_key(|root| root.components().count())
     }
 
     fn server_for(&self, cfg: &LanguageServerConfig, language: &LanguageId, path: &Path) -> Arc<Server> {
@@ -1403,7 +1419,16 @@ impl LspManager {
     }
 
     async fn ready_targets(&self, servers: &[Arc<Server>], pred: impl Fn(&ServerCaps) -> bool) -> Vec<Target> {
-        let ready = join_all(servers.iter().map(|s| s.wait_ready(START_WAIT))).await;
+        self.ready_targets_within(servers, START_WAIT, pred).await
+    }
+
+    async fn ready_targets_within(
+        &self,
+        servers: &[Arc<Server>],
+        wait: Duration,
+        pred: impl Fn(&ServerCaps) -> bool,
+    ) -> Vec<Target> {
+        let ready = join_all(servers.iter().map(|s| s.wait_ready(wait))).await;
         servers
             .iter()
             .zip(ready)
@@ -1421,8 +1446,18 @@ impl LspManager {
         feature: &str,
         pred: impl Fn(&ServerCaps) -> bool,
     ) -> IdeResult<(DocSnap, Vec<Target>)> {
+        self.doc_targets_within(doc, feature, START_WAIT, pred).await
+    }
+
+    async fn doc_targets_within(
+        &self,
+        doc: DocId,
+        feature: &str,
+        wait: Duration,
+        pred: impl Fn(&ServerCaps) -> bool,
+    ) -> IdeResult<(DocSnap, Vec<Target>)> {
         let snap = self.snapshot(doc)?;
-        let targets = self.ready_targets(&snap.servers, pred).await;
+        let targets = self.ready_targets_within(&snap.servers, wait, pred).await;
         if targets.is_empty() {
             return Err(unsupported(&snap.servers, feature));
         }
@@ -1632,7 +1667,12 @@ impl LspManager {
             }
         }
         let (method, cap, feature) = goto_method(kind);
-        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap)).await?;
+        // The editor has a fallback for these two only; the others still wait for the server.
+        let wait = match kind {
+            GotoKind::Definition | GotoKind::Declaration => NAV_START_WAIT,
+            GotoKind::TypeDefinition | GotoKind::Implementation => START_WAIT,
+        };
+        let (snap, targets) = self.doc_targets_within(doc, feature, wait, |c| c.has(cap)).await?;
         self.goto_in(&snap, &targets, method, pos, None, None).await
     }
 

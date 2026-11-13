@@ -23,6 +23,7 @@ const cmd = {
   syntaxErrors: vi.fn((): R<unknown> => ok({ errors: [], truncated: false })),
   findSymbols: vi.fn((): R<SymbolMatch[]> => ok([])),
   navIndexDefinitions: vi.fn((): R<SymbolMatch[]> => ok([])),
+  lspServers: vi.fn((): R<unknown[]> => ok([])),
   navResolveModule: vi.fn((): R<string | null> => ok(null)),
   applyWorkspaceEdit: vi.fn((): R<unknown> => ok(null)),
 };
@@ -1062,4 +1063,78 @@ describe("same-document fragment navigation", () => {
       expect(openFile).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("ruby navigation", () => {
+  const MODEL = "/k3/gems/a/app/models/upgrade.rb";
+  const SOURCE = "class Upgrade\n  def ids = logs.error\nend\n";
+
+  it("answers a name the server cannot resolve from the whole index, the current file first", async () => {
+    cmd.lspGoto.mockReturnValueOnce(ok([]));
+    cmd.findSymbols.mockReturnValueOnce(
+      ok([
+        sym("logs", "property", "/k3/apps/b/app/models/other.rb", "Other"),
+        sym("logs", "property", MODEL, "Upgrade"),
+        sym("logs", "method", "/k3/gems/a/spec/models/upgrade_spec.rb"),
+      ]),
+    );
+    const view = editor(SOURCE, "ruby", SOURCE.indexOf("logs") + 1, MODEL);
+    await gotoTargets(view, "definition");
+    expect(cmd.navIndexDefinitions).not.toHaveBeenCalled();
+    expect(openFile).toHaveBeenCalledWith(MODEL, { selection: { line: 3, col: 4 }, focus: true });
+  });
+
+  it("adds the index declarations a server's guesses miss", async () => {
+    cmd.lspGoto.mockReturnValueOnce(
+      ok([
+        { path: "/k3/lib/a.rb", range: r(3, 4, 9), uri: null },
+        { path: "/k3/lib/b.rb", range: r(7, 6, 11), uri: null },
+      ]),
+    );
+    cmd.findSymbols.mockReturnValueOnce(
+      ok([sym("error", "method", "/k3/lib/a.rb"), sym("error", "method", "/k3/gems/a/app/models/log.rb", "Log")]),
+    );
+    const view = editor(SOURCE, "ruby", SOURCE.indexOf("error") + 1, MODEL);
+    await gotoTargets(view, "definition");
+    const popup = useLspPopup.getState().popup;
+    expect(popup?.kind).toBe("list");
+    if (popup?.kind !== "list") return;
+    expect(popup.items).toHaveLength(3);
+    expect(openFile).not.toHaveBeenCalled();
+  });
+
+  it("answers from the index at once while the server is still indexing", async () => {
+    const { emitLocalIdeEvent } = await import("@/platform/ipc");
+    const status = (s: "busy" | "ready") =>
+      emitLocalIdeEvent({ type: "languageServer", server: 1, name: "ruby-lsp", status: s, message: null } as never);
+    cmd.lspServers.mockReturnValue(
+      ok([{ id: 1, name: "ruby-lsp", root: "/k3", languages: ["ruby"], status: "busy", pid: null }]),
+    );
+    status("busy");
+    cmd.syntaxLocals.mockReturnValueOnce(
+      ok({ status: "notLocal", name: "logs", range: r(1, 12, 16), reason: "member" }),
+    );
+    cmd.findSymbols.mockReturnValueOnce(
+      ok([
+        sym("logs", "property", "/k3/apps/b/app/models/other.rb"),
+        sym("logs", "property", MODEL),
+        sym("logs", "property", "/k3/gems/a/spec/models/upgrade_spec.rb"),
+      ]),
+    );
+    const view = editor(SOURCE, "ruby", SOURCE.indexOf("logs") + 1, MODEL);
+    await gotoTargets(view, "definition");
+    expect(cmd.lspGoto).not.toHaveBeenCalled();
+    expect(openFile).toHaveBeenCalledWith(MODEL, { selection: { line: 3, col: 4 }, focus: true });
+    cmd.lspServers.mockReturnValue(ok([]));
+    status("ready");
+  });
+
+  it("offers test code only from tests", async () => {
+    const found = [sym("pluck", "method", "/k3/gems/a/spec/support/helpers.rb")];
+    cmd.findSymbols.mockReturnValueOnce(ok(found));
+    expect(await fb.projectDefinitions(MODEL, "pluck")).toEqual([]);
+    cmd.findSymbols.mockReturnValueOnce(ok(found));
+    const fromSpec = await fb.projectDefinitions("/k3/gems/a/spec/models/upgrade_spec.rb", "pluck");
+    expect(fromSpec.map((t) => t.path)).toEqual(["/k3/gems/a/spec/support/helpers.rb"]);
+  });
 });

@@ -146,6 +146,26 @@ export async function indexDefinitions(path: string, name: string): Promise<Decl
   );
 }
 
+const INFERRED_LANGUAGES: ReadonlySet<string> = new Set(["ruby"]);
+
+export function infersDeclarations(language: string): boolean {
+  return INFERRED_LANGUAGES.has(language);
+}
+
+const TEST_DIR = /[\\/](spec|test|tests)[\\/]/;
+
+export async function projectDefinitions(path: string, name: string): Promise<DeclarationTarget[]> {
+  const matches = await call(commands.findSymbols(name, "all", SYMBOL_LIMIT));
+  const fromTests = TEST_DIR.test(path);
+  const symbols = filterSymbols(matches, name, "other").filter(
+    (s) => compatibleFiles(path, s.path) && (fromTests || !TEST_DIR.test(s.path)),
+  );
+  return rankTargets(
+    symbols.map((s) => ({ path: s.path, range: s.range, name: s.name, kind: s.kind, container: s.container })),
+    path,
+  );
+}
+
 /**
  * Go to Declaration without a language server: a certain local definition,
  * otherwise project index symbols with exactly that name (filtered by the
@@ -170,7 +190,10 @@ export async function declarationFallback(
   // A member (`obj.name`) can be any member of that name; only a plain name has a syntactic role.
   const role = locals?.status === "notLocal" && locals.reason === "member" ? "other" : usageRole(at);
   const matches = await call(commands.findSymbols(name, "all", SYMBOL_LIMIT));
-  const symbols = filterSymbols(matches, name, role).filter((s) => compatibleFiles(doc.path, s.path));
+  const skipTests = infersDeclarations(doc.language) && !TEST_DIR.test(doc.path);
+  const symbols = filterSymbols(matches, name, role).filter(
+    (s) => compatibleFiles(doc.path, s.path) && !(skipTests && TEST_DIR.test(s.path)),
+  );
   const targets = rankTargets(
     symbols.map((s) => ({ path: s.path, range: s.range, name: s.name, kind: s.kind, container: s.container })),
     doc.path,

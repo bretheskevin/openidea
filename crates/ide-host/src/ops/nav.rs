@@ -151,9 +151,11 @@ pub async fn nav_resolve_module(host: &Host, window: &str, name: String, from: I
 
 /// Index definitions named `name` in the other roots `from` may navigate into (its configured
 /// dependencies and extra content roots — see `navigation_roots`): the cross-root answer when
-/// the language server cannot resolve an import into an attached dependency project. `from`'s
-/// own root is left out: the server sees it, so a name it could not resolve there is not
-/// answered by every declaration that happens to share it (any `save` for `repo.save()`).
+/// the language server cannot resolve an import into an attached dependency project. What the
+/// server sees is left out, so a name it could not resolve there is not answered by every
+/// declaration that happens to share it (any `save` for `repo.save()`). That is `from`'s own
+/// root, unless its server only analyses a member folder of it (a monorepo app with its own
+/// `Gemfile`): the rest of the root is then as unseen as a dependency.
 pub async fn nav_index_definitions(
     host: &Host,
     window: &str,
@@ -163,13 +165,18 @@ pub async fn nav_index_definitions(
     let project = host.project(window)?;
     blocking(move || {
         let roots = crate::project::navigation_roots(&project, &from);
-        let Some((_own, roots)) = roots.split_first() else { return Ok(Vec::new()) };
+        let Some((own, deps)) = roots.split_first() else { return Ok(Vec::new()) };
+        let seen = project.lsp.server_root_for(&from).filter(|root| root != own && root.starts_with(own));
+        let (roots, except) = match seen {
+            Some(seen) => ([std::slice::from_ref(own), deps].concat(), vec![seen]),
+            None => (deps.to_vec(), Vec::new()),
+        };
         if roots.is_empty() {
             return Ok(Vec::new());
         }
         // Filter inside the index: a cap applied before the root filter can fill with
         // own-root matches and evict the dependency roots entirely.
-        Ok(project.index.symbols_named_within(&name, None, roots, 500))
+        Ok(project.index.symbols_named_within(&name, None, &roots, &except, 500))
     })
     .await
 }

@@ -320,16 +320,18 @@ impl ProjectIndex {
     }
 
     /// Symbols named exactly `name` (of `kind`, if given) whose file is inside one of `roots`
-    /// (the project root plus its configured dependency roots): answers bounded by the cap
-    /// never evict matches from a root because another root filled it first.
+    /// (the project root plus its configured dependency roots) and outside the `except`
+    /// folders: answers bounded by the cap never evict matches from a root because another
+    /// root, or an excepted folder, filled it first.
     pub fn symbols_named_within(
         &self,
         name: &str,
         kind: Option<SymbolKind>,
         roots: &[PathBuf],
+        except: &[PathBuf],
         limit: usize,
     ) -> Vec<SymbolMatch> {
-        matching::symbols_named_within(&self.shared.data.read(), name, kind, roots, limit)
+        matching::symbols_named_within(&self.shared.data.read(), name, kind, roots, except, limit)
     }
 
     /// Incrementally re-indexes changed paths (called from the vfs watcher).

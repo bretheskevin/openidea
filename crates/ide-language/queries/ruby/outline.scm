@@ -9,3 +9,11 @@
   method: (identifier) @_m
   arguments: (argument_list . (simple_symbol) @name)
   (#any-of? @_m "attr_accessor" "attr_reader" "attr_writer")) @def.property
+(call
+  method: (identifier) @_m
+  arguments: (argument_list . (simple_symbol) @name)
+  (#any-of? @_m "has_many" "has_one" "belongs_to" "has_and_belongs_to_many")) @def.property
+(call
+  method: (identifier) @_m
+  arguments: (argument_list . (simple_symbol) @name)
+  (#eq? @_m "scope")) @def.method

@@ -619,6 +619,9 @@ fn outline_ruby() {
         r#"module Billing
   class Invoice < Base
     attr_accessor :total
+    has_many :lines, class_name: "InvoiceLine"
+    belongs_to :customer
+    scope :overdue, -> { where(paid: false) }
     VERSION = "1"
     def initialize(total)
       @total = total
@@ -632,6 +635,9 @@ end
         Module Billing
           Class Invoice
             Property total
+            Property lines
+            Property customer
+            Method overdue
             Constant VERSION
             Constructor initialize
             Method build

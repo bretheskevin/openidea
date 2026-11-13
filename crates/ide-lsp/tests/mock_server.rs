@@ -1779,6 +1779,26 @@ async fn a_progress_task_that_stops_reporting_is_marked_but_stays_open() {
 /// While a server says it is loading the project (rust-analyzer: `serverStatus`
 /// not quiescent) an empty or withdrawn answer is asked again once loading moves
 /// on. `$/progress` alone (background indexing, `cargo check`) doesn't wait.
+/// Go to Definition doesn't hold a click for a server still starting (seconds for Ruby LSP,
+/// minutes for jdtls): it is unavailable at once, so the editor answers from the index.
+#[tokio::test(flavor = "multi_thread")]
+async fn definition_does_not_wait_for_a_starting_server() {
+    let h = harness(&[("mock", incremental_caps())]);
+    let state = h.launcher.state("mock");
+    let gate = Arc::new(Gate::default());
+    *state.initialize_gate.lock() = Some(gate.clone());
+    let (doc, _) = h.open("a.mk", "fn foo() {}\nfoo();\n");
+    eventually(|| gate.entered()).await;
+    let started = std::time::Instant::now();
+    let err = h.mgr.goto(doc, Pos::new(1, 1), GotoKind::Definition).await.unwrap_err();
+    assert_eq!(err.kind, ide_core::error::ErrorKind::Unavailable);
+    assert!(started.elapsed() < Duration::from_secs(3), "waited {:?}", started.elapsed());
+    gate.open();
+    h.wait_status("mock", ServerStatus::Ready).await;
+    h.mgr.goto(doc, Pos::new(1, 1), GotoKind::Definition).await.unwrap();
+    assert_eq!(state.requested("textDocument/definition").len(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn navigation_waits_for_a_server_that_is_still_loading() {
     #[derive(Clone, Copy, Debug)]
